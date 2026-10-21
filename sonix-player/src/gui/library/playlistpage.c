@@ -66,6 +66,7 @@ typedef struct {
 static bool grid_mode;
 static medialist_grid_t grid; // the tiles' shape, while grid_mode
 static int tile_h;
+static bool tiles_refit; // Large text changed since the tiles were measured
 static tile_t *tiles;
 static int tile_count;
 static int tile_cap;
@@ -576,7 +577,7 @@ static lv_obj_t *add_row(const char *name, const char *subtitle, const lv_image_
 		lv_obj_set_size(menu_btn, side, side);
 		lv_obj_set_ignore_layout(menu_btn, true);
 		lv_obj_align(menu_btn, LV_ALIGN_TOP_RIGHT, -inset, inset);
-		lv_obj_set_style_bg_color(menu_btn, theme()->surface, 0);
+		lv_obj_add_style(menu_btn, &theme_style_card, 0); // follows the theme
 		lv_obj_set_style_bg_opa(menu_btn, LV_OPA_COVER, 0);
 		lv_obj_set_style_radius(menu_btn, LV_RADIUS_CIRCLE, 0);
 	}
@@ -687,8 +688,8 @@ static void tile_drop(tile_t *t, bool widgets_alive) {
 	t->settled = false;
 }
 
-// Gives every cover and request back. After lv_obj_clean(): the tiles are gone
-// and nothing draws from the pixels any more.
+// Gives every cover and request back. Just before lv_obj_clean(), which takes
+// the tiles' widgets with it: nothing draws in between.
 static void tiles_reset(void) {
 	for (int i = 0; i < tile_count; i++) {
 		tile_drop(&tiles[i], false);
@@ -1427,8 +1428,13 @@ static unsigned rows_revision;
 
 static void rebuild_rows(void) {
 	rows_revision = library_revision(LIBRARY_LIST_PLAYLIST);
-	lv_obj_clean(list);
+	// The tiles are let go of before the rows are deleted, not after: cleaning
+	// scrolls the list back to the top, and the scroll event would otherwise
+	// reach tiles_update() with tiles whose widgets are already gone.
 	tiles_reset();
+	grid_mode = false;
+	tiles_refit = false;
+	lv_obj_clean(list);
 
 	grid_mode = !picking && medialist_album_grid();
 	if (grid_mode) {
@@ -1587,28 +1593,29 @@ void playlistpage_add_tracks(const char *const *paths, int count) {
 
 static void screen_loaded_cb(lv_event_t *e) {
 	(void)e;
-	// Rebuilt as well when "Album grid" or its columns changed since the rows
-	// were made.
-	if (rows_revision != library_revision(LIBRARY_LIST_PLAYLIST) || grid_mode != (!picking && medialist_album_grid()) || (grid_mode && grid.columns != medialist_grid_columns())) {
+	// Rebuilt as well when "Album grid", its columns or Large text changed
+	// since the rows were made.
+	if (rows_revision != library_revision(LIBRARY_LIST_PLAYLIST) || grid_mode != (!picking && medialist_album_grid()) || (grid_mode && (grid.columns != medialist_grid_columns() || tiles_refit))) {
 		rebuild_rows();
 	} else {
 		tiles_update();
 	}
 }
 
-// Requests still queued are let go of: the worker would otherwise decode them
-// for a page nobody is looking at. The covers already up stay.
+// The covers and the requests still queued are let go of, as the library's
+// grids do: the worker would otherwise decode for a page nobody is looking at,
+// and the covers would stay decoded behind the playlist opened from here.
+// Coming back asks for them again, from the thumbnail cache.
 static void screen_unloaded_cb(lv_event_t *e) {
 	(void)e;
 	for (int i = 0; i < tile_count; i++) {
-		tile_t *t = &tiles[i];
-		if (t->slot >= 0) {
-			coverloader_release(COVERLOADER_PLAYLISTS_BASE + t->slot);
-			slot_taken[t->slot] = false;
-			t->slot = -1;
-		}
+		tile_drop(&tiles[i], true);
 	}
 }
+
+// A tile's height comes from the fonts; the page is never the one on screen
+// while Large text is switched, so it is measured again on the way back in.
+static void fonts_changed(void) { tiles_refit = true; }
 
 void playlistpage_init(gui_config_t *cfg) {
 	config = cfg;
@@ -1777,6 +1784,7 @@ void playlistpage_init(gui_config_t *cfg) {
 	lv_obj_add_event_cb(playlistpage_screen, screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 	lv_obj_add_event_cb(playlistpage_screen, screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 	lv_obj_add_event_cb(list, list_scroll_cb, LV_EVENT_SCROLL, NULL);
+	fonts_register_change(fonts_changed);
 	tile_timer = lv_timer_create(tile_timer_cb, TILE_POLL_MS, NULL);
 	lv_timer_pause(tile_timer);
 	switcher_attach_back_gesture(playlistpage_screen);
